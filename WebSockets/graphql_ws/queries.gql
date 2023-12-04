@@ -1,0 +1,13 @@
+subscription {
+    operationFinished{
+        endDate
+        name
+        value
+    }
+}
+
+
+mutation {
+  scheduleOperation(name: "Test Name 2!")
+}
+
