@@ -1,54 +1,99 @@
-const express = require('express');
-const { ApolloServer } = require('apollo-server-express');
-const { execute, subscribe } = require('graphql');
-const { createServer } = require('http');
-const { SubscriptionServer } = require('subscriptions-transport-ws');
-const { makeExecutableSchema } = require('graphql-tools');
+import { ApolloServer } from '@apollo/server';
+import { createServer } from 'http';
+import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
+import { makeExecutableSchema } from '@graphql-tools/schema';
+import bodyParser from 'body-parser';
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import { useServer } from 'graphql-ws/lib/use/ws';
+import { PubSub } from 'graphql-subscriptions';
+
+const port = 3000;
+let counter = 0;
 
 const typeDefs = `
-  type Query {
-    hello: String
-  }
+    type Query {
+        foo: String!
+    }
+    type Mutation {
+        scheduleOperation(name: String!): String!
+    }
+    type Subscription {
+        operationFinished: Operation!
+    }
 
-  type Subscription {
-    messageAdded: String
-  }
+    type Operation {
+        name: String!
+        endDate: String!
+        value: Int!
+    }
 `;
 
+const pubSub = new PubSub();
+
+const mockLongLastingOperation = (name) => {
+    setTimeout(() => {
+        counter++;
+        pubSub.publish('OPERATION_FINISHED', { operationFinished: { name, endDate: new Date().toDateString(), value: counter } });
+    }, 1000);
+}
+
 const resolvers = {
-  Query: {
-    hello: () => 'Hello, World!',
-  },
-  Subscription: {
-    messageAdded: {
-      subscribe: () => pubsub.asyncIterator(['MESSAGE_ADDED']),
+    Mutation: {
+        scheduleOperation(_, { name }) {
+            mockLongLastingOperation(name);
+            return `Operation: ${name} scheduled!`;
+        }
+    }, 
+    Query: {
+        foo() {
+            return 'foo';
+        }
     },
-  },
+    Subscription: {
+        operationFinished: {
+            subscribe: () => pubSub.asyncIterator(['OPERATION_FINISHED'])
+        } 
+    }
 };
 
-const schema = makeExecutableSchema({
-  typeDefs,
-  resolvers,
-});
+const schema = makeExecutableSchema({ typeDefs, resolvers });
 
 const app = express();
-
-const server = new ApolloServer({
-  schema,
-});
-
-server.applyMiddleware({ app });
-
 const httpServer = createServer(app);
 
-httpServer.listen({ port: 4000 }, () => {
-  console.log(`Server ready at http://localhost:4000${server.graphqlPath}`);
-  new SubscriptionServer({
-    execute,
-    subscribe,
-    schema,
-  }, {
+const wsServer = new WebSocketServer({
     server: httpServer,
-    path: server.graphqlPath,
-  });
+    path: '/graphql'
+});
+
+const wsServerCleanup = useServer({ schema }, wsServer);
+
+const apolloServer = new ApolloServer({
+    schema,
+    plugins: [
+       // Proper shutdown for the HTTP server.
+       ApolloServerPluginDrainHttpServer({ httpServer }),
+
+       // Proper shutdown for the WebSocket server.
+       {
+        async serverWillStart() {
+            return {
+                async drainServer() {
+                    await wsServerCleanup.dispose();
+                }
+            }
+        }
+       }
+    ]
+});
+
+await apolloServer.start();
+
+app.use('/graphql', bodyParser.json(), expressMiddleware(apolloServer));
+
+httpServer.listen(port, () => {
+    console.log(`🚀 Query endpoint ready at http://localhost:${port}/graphql`);
+    console.log(`🚀 Subscription endpoint ready at ws://localhost:${port}/graphql`);
 });
